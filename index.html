@@ -1,0 +1,486 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth';
+import { 
+  getFirestore, 
+  collection, 
+  doc, 
+  setDoc, 
+  onSnapshot, 
+  deleteDoc,
+  addDoc,
+  serverTimestamp 
+} from 'firebase/firestore';
+import { 
+  Users, 
+  FileText, 
+  Calendar, 
+  Briefcase, 
+  Wallet, 
+  Settings, 
+  LogOut, 
+  Plus, 
+  Trash2, 
+  Edit2, 
+  Upload,
+  ChevronRight,
+  X,
+  Home
+} from 'lucide-react';
+
+// --- Firebase Configuration ---
+const firebaseConfig = {
+  apiKey: "AIzaSyBR5kve0K8M6p3I3rSwfARGxW895w_wckc", 
+  authDomain: "aimc-14772.firebaseapp.com",
+  databaseURL: "https://aimc-14772-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "aimc-14772",
+  storageBucket: "aimc-14772.firebasestorage.app",
+  messagingSenderId: "421760174550",
+  appId: "1:421760174550:web:4e756dca9e6f4343537c77"
+};
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const currentAppId = "aimc-14772";
+
+// --- Constants ---
+const DEPARTMENTS = [
+  '사무국', '문화국', '학술국', '학생국', '복지국', '홍보국', '유학생국'
+];
+const YEARS = Array.from({ length: 11 }, (_, i) => 2020 + i);
+const SUB_CATEGORIES = [
+  { id: 'minutes', label: '부서회의록', icon: FileText },
+  { id: 'schedule', label: '부서 일정', icon: Calendar },
+  { id: 'events', label: '행사(사업)', icon: Briefcase },
+  { id: 'budget', label: '부서 예산 및 결산 (안)', icon: Wallet }
+];
+
+const App = () => {
+  const [user, setUser] = useState(null);
+  const [authStatus, setAuthStatus] = useState('initializing'); // 'initializing' | 'authenticated' | 'anonymous-failed'
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [activeYear, setActiveYear] = useState(new Date().getFullYear());
+  const [activeMenu, setActiveMenu] = useState('home');
+  const [selectedDept, setSelectedDept] = useState(null);
+  const [selectedSub, setSelectedSub] = useState('minutes');
+  
+  const [showAdminLogin, setShowAdminLogin] = useState(false);
+  const [adminPassword, setAdminPassword] = useState('');
+  
+  // 데이터 상태
+  const [homeContent, setHomeContent] = useState({ 
+    title: '우송대학교 AI경영학과 학생회', 
+    description: '학생들의 목소리를 대변하는 AI경영학과 학생회입니다.' 
+  });
+  const [orgData, setOrgData] = useState(null);
+  const [posts, setPosts] = useState([]);
+
+  // --- Auth logic (RULE 3 - 에러 핸들링 강화) ---
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          // 익명 로그인이 설정되지 않았을 경우(configuration-not-found)를 대비해 catch에서 무음 처리
+          await signInAnonymously(auth).catch(err => {
+            console.warn("익명 인증 활성화 필요:", err.code);
+            setAuthStatus('anonymous-failed');
+          });
+        }
+      } catch (error) {
+        // 전역 에러 핸들링
+        setAuthStatus('anonymous-failed');
+      }
+    };
+
+    initAuth();
+    const unsubscribe = onAuthStateChanged(auth, (u) => {
+      if (u) {
+        setUser(u);
+        setAuthStatus('authenticated');
+      }
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // --- Data Fetching (RULE 1 & 2) ---
+  // authStatus가 'authenticated'이거나 'anonymous-failed'여도 읽기 시도 (Public Read 규칙 기준)
+  useEffect(() => {
+    const baseRef = ['artifacts', currentAppId, 'public', 'data'];
+
+    // 1. 홈 설정
+    const homeRef = doc(db, ...baseRef, 'configs', 'home');
+    const unsubHome = onSnapshot(homeRef, (snap) => {
+      if (snap.exists()) setHomeContent(snap.data());
+    }, (err) => console.log("홈 로드 제한됨 (로그인 필요할 수 있음)"));
+
+    // 2. 조직도
+    const orgRef = doc(db, ...baseRef, 'org_charts', `year_${activeYear}`);
+    const unsubOrg = onSnapshot(orgRef, (snap) => {
+      if (snap.exists()) setOrgData(snap.data());
+      else setOrgData(null);
+    }, (err) => console.log("조직도 로드 제한됨"));
+
+    // 3. 게시글
+    let colId = `posts_${activeYear}_${activeMenu}`;
+    if (activeMenu === 'dept' && selectedDept) {
+      colId = `posts_${activeYear}_${selectedDept}_${selectedSub}`;
+    }
+    const postsCol = collection(db, ...baseRef, colId);
+    const unsubPosts = onSnapshot(postsCol, (snap) => {
+      const items = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      setPosts(items);
+    }, (err) => console.log("게시글 로드 제한됨"));
+
+    return () => {
+      unsubHome();
+      unsubOrg();
+      unsubPosts();
+    };
+  }, [activeYear, activeMenu, selectedDept, selectedSub]);
+
+  // --- Handlers ---
+  const handleAdminLogin = () => {
+    if (adminPassword === '0063') {
+      setIsAdmin(true);
+      setShowAdminLogin(false);
+      setAdminPassword('');
+    } else {
+      alert('비밀번호가 올바르지 않습니다.');
+    }
+  };
+
+  const updateHomeContent = async (newData) => {
+    if (!isAdmin) return;
+    try {
+      const homeRef = doc(db, 'artifacts', currentAppId, 'public', 'data', 'configs', 'home');
+      await setDoc(homeRef, newData);
+    } catch (e) { alert("저장 권한이 없습니다. Firebase Console에서 익명 인증을 활성화하세요."); }
+  };
+
+  const saveOrgData = async (data) => {
+    if (!isAdmin) return;
+    try {
+      const orgRef = doc(db, 'artifacts', currentAppId, 'public', 'data', 'org_charts', `year_${activeYear}`);
+      await setDoc(orgRef, data);
+    } catch (e) { alert("저장 권한이 없습니다."); }
+  };
+
+  const addPost = async (title, content, fileName = null) => {
+    if (!isAdmin) return;
+    try {
+      let colId = `posts_${activeYear}_${activeMenu}`;
+      if (activeMenu === 'dept' && selectedDept) {
+        colId = `posts_${activeYear}_${selectedDept}_${selectedSub}`;
+      }
+      const postsCol = collection(db, 'artifacts', currentAppId, 'public', 'data', colId);
+      await addDoc(postsCol, {
+        title,
+        content,
+        fileName,
+        author: '관리자',
+        createdAt: serverTimestamp()
+      });
+    } catch (e) { alert("쓰기 권한이 없습니다."); }
+  };
+
+  const deletePost = async (postId) => {
+    if (!isAdmin) return;
+    try {
+      let colId = `posts_${activeYear}_${activeMenu}`;
+      if (activeMenu === 'dept' && selectedDept) {
+        colId = `posts_${activeYear}_${selectedDept}_${selectedSub}`;
+      }
+      await deleteDoc(doc(db, 'artifacts', currentAppId, 'public', 'data', colId, postId));
+    } catch (e) { alert("삭제 권한이 없습니다."); }
+  };
+
+  return (
+    <div className="flex min-h-screen bg-slate-50 text-slate-900 font-sans">
+      {/* Sidebar */}
+      <aside className="w-64 bg-slate-900 text-white flex flex-col sticky top-0 h-screen">
+        <div className="p-6">
+          <div className="flex items-center gap-3 mb-8">
+            <div className="w-10 h-10 bg-blue-600 rounded-lg flex items-center justify-center font-bold text-xs leading-none text-center shadow-lg shadow-blue-900/50">
+              AI<br/>BIZ
+            </div>
+            <div>
+              <h1 className="text-sm font-bold text-white">우송대학교</h1>
+              <p className="text-[10px] text-slate-400">AI경영학과 학생회</p>
+            </div>
+          </div>
+
+          <nav className="space-y-1">
+            <SidebarItem icon={<Home size={18}/>} label="홈" active={activeMenu === 'home'} onClick={() => setActiveMenu('home')} />
+            <SidebarItem icon={<Users size={18}/>} label="조직도" active={activeMenu === 'org'} onClick={() => setActiveMenu('org')} />
+            
+            <div className="py-4 px-3">
+              <p className="text-[10px] uppercase font-bold text-slate-500 tracking-widest">부서별 기록</p>
+            </div>
+            
+            <div className="space-y-1 max-h-[40vh] overflow-y-auto custom-scrollbar">
+              {DEPARTMENTS.map(dept => (
+                <SidebarItem 
+                  key={dept}
+                  label={dept}
+                  dot
+                  active={activeMenu === 'dept' && selectedDept === dept}
+                  onClick={() => { setActiveMenu('dept'); setSelectedDept(dept); }}
+                />
+              ))}
+            </div>
+          </nav>
+        </div>
+
+        <div className="mt-auto p-6 border-t border-slate-800">
+          {authStatus === 'anonymous-failed' && (
+             <div className="mb-4 p-2 bg-red-900/20 text-red-400 text-[9px] rounded border border-red-900/30 leading-tight">
+               Firebase: 익명 인증 비활성 상태입니다. <br/>쓰기 권한이 제한될 수 있습니다.
+             </div>
+          )}
+          {isAdmin ? (
+            <button onClick={() => setIsAdmin(false)} className="w-full flex items-center gap-2 text-red-400 hover:text-red-300 text-sm font-medium transition-colors">
+              <LogOut size={16}/> 관리자 로그아웃
+            </button>
+          ) : (
+            <button onClick={() => setShowAdminLogin(true)} className="w-full flex items-center gap-2 text-slate-400 hover:text-white text-sm font-medium transition-colors">
+              <Settings size={16}/> 관리자 접속
+            </button>
+          )}
+        </div>
+      </aside>
+
+      <div className="flex-1 flex flex-col">
+        {/* Top Header */}
+        <header className="h-16 bg-white border-b px-8 flex items-center justify-between sticky top-0 z-10 shadow-sm shadow-slate-100">
+          <div className="flex items-center gap-4">
+            <span className="text-sm font-bold text-slate-400 uppercase tracking-tighter">{activeMenu}</span>
+            <ChevronRight size={14} className="text-slate-300"/>
+            <select 
+              value={activeYear}
+              onChange={(e) => setActiveYear(parseInt(e.target.value))}
+              className="text-sm font-bold bg-slate-100 border-none rounded-md px-3 py-1.5 focus:ring-2 focus:ring-blue-600 transition-all cursor-pointer"
+            >
+              {YEARS.map(y => <option key={y} value={y}>{y}학년도</option>)}
+            </select>
+          </div>
+          {isAdmin && (
+            <div className="bg-amber-100 text-amber-700 px-3 py-1 rounded-full text-[10px] font-bold ring-1 ring-amber-200 animate-pulse">ADMIN ACTIVE</div>
+          )}
+        </header>
+
+        {/* Main View */}
+        <main className="p-8 max-w-5xl mx-auto w-full">
+          {activeMenu === 'home' && (
+            <div className="space-y-8 animate-in fade-in slide-in-from-bottom-2 duration-500">
+              <div className="bg-gradient-to-br from-blue-600 via-blue-700 to-indigo-800 rounded-[2.5rem] p-12 text-white shadow-2xl shadow-blue-200 relative overflow-hidden">
+                <div className="absolute top-0 right-0 w-64 h-64 bg-white/5 rounded-full -mr-20 -mt-20 blur-3xl"></div>
+                <h2 className="text-4xl font-black mb-4 leading-tight relative z-10">{homeContent.title}</h2>
+                <p className="text-blue-100 text-lg opacity-90 relative z-10 max-w-xl">{homeContent.description}</p>
+              </div>
+
+              {isAdmin && (
+                <div className="bg-white border-2 border-dashed border-slate-200 rounded-3xl p-6 shadow-sm">
+                  <h4 className="text-xs font-black mb-4 text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                    <Edit2 size={12}/> 홈 메인 문구 수정
+                  </h4>
+                  <div className="grid gap-4">
+                    <input className="bg-slate-50 border-none p-4 rounded-2xl text-sm font-bold focus:ring-2 focus:ring-blue-600" value={homeContent.title} onChange={e => setHomeContent({...homeContent, title: e.target.value})}/>
+                    <textarea className="bg-slate-50 border-none p-4 rounded-2xl text-sm h-24 focus:ring-2 focus:ring-blue-600" value={homeContent.description} onChange={e => setHomeContent({...homeContent, description: e.target.value})}/>
+                    <button onClick={() => updateHomeContent(homeContent)} className="bg-blue-600 text-white py-3 rounded-2xl font-bold text-sm hover:bg-blue-700 transition-all shadow-lg shadow-blue-100">내용 저장</button>
+                  </div>
+                </div>
+              )}
+
+              <div className="grid md:grid-cols-3 gap-8">
+                <div className="md:col-span-2 space-y-6">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-xl font-black text-slate-800">최근 게시물</h3>
+                    <div className="h-px flex-1 bg-slate-100 mx-4"></div>
+                  </div>
+                  <PostList posts={posts} isAdmin={isAdmin} onDelete={deletePost} />
+                </div>
+                <div className="space-y-6">
+                  <h3 className="text-xl font-black text-slate-800">퀵 링크</h3>
+                  <div className="bg-white border border-slate-100 rounded-[2rem] p-4 space-y-2 shadow-sm">
+                    <button className="w-full text-left p-4 hover:bg-slate-50 rounded-2xl text-sm font-bold flex justify-between items-center transition-all group">학과 홈페이지 <ChevronRight size={14} className="group-hover:translate-x-1 transition-transform"/></button>
+                    <button className="w-full text-left p-4 hover:bg-slate-50 rounded-2xl text-sm font-bold flex justify-between items-center transition-all group">학사 일정 <ChevronRight size={14} className="group-hover:translate-x-1 transition-transform"/></button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activeMenu === 'org' && <OrgChart data={orgData} year={activeYear} isAdmin={isAdmin} onSave={saveOrgData} />}
+
+          {activeMenu === 'dept' && (
+            <div className="space-y-6 animate-in fade-in duration-500">
+              <div className="flex gap-2 overflow-x-auto pb-4 no-scrollbar">
+                {SUB_CATEGORIES.map(sub => (
+                  <button 
+                    key={sub.id} 
+                    onClick={() => setSelectedSub(sub.id)}
+                    className={`flex-shrink-0 flex items-center gap-2 px-6 py-3 rounded-2xl text-sm font-bold transition-all ${selectedSub === sub.id ? 'bg-blue-600 text-white shadow-xl shadow-blue-100 translate-y-[-2px]' : 'bg-white text-slate-400 border border-slate-100 hover:bg-slate-50'}`}
+                  >
+                    <sub.icon size={16}/> {sub.label}
+                  </button>
+                ))}
+              </div>
+
+              <div className="bg-white rounded-[2.5rem] p-10 border border-slate-100 shadow-xl shadow-slate-200/50">
+                <div className="flex justify-between items-end mb-10 border-b border-slate-50 pb-8">
+                  <div>
+                    <h2 className="text-4xl font-black tracking-tight text-slate-800">{selectedDept}</h2>
+                    <p className="text-blue-500 font-bold text-sm mt-2 flex items-center gap-2">
+                      <span className="w-4 h-[2px] bg-blue-500"></span>
+                      {SUB_CATEGORIES.find(s=>s.id===selectedSub)?.label}
+                    </p>
+                  </div>
+                  {isAdmin && (
+                    <button 
+                      onClick={() => {
+                        const t = prompt('제목:');
+                        const c = prompt('내용:');
+                        if(t && c) addPost(t, c);
+                      }}
+                      className="bg-slate-900 text-white px-6 py-3 rounded-2xl font-bold text-sm flex items-center gap-2 hover:bg-slate-800 transition-all shadow-lg"
+                    >
+                      <Plus size={18}/> 새 글 작성
+                    </button>
+                  )}
+                </div>
+                <PostList posts={posts} isAdmin={isAdmin} onDelete={deletePost} />
+              </div>
+            </div>
+          )}
+        </main>
+      </div>
+
+      {/* Admin Auth Modal */}
+      {showAdminLogin && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-md z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-[2.5rem] p-10 w-full max-w-sm shadow-2xl animate-in zoom-in-95 duration-200">
+            <div className="w-16 h-16 bg-blue-50 rounded-2xl flex items-center justify-center text-blue-600 mb-6">
+              <Settings size={32}/>
+            </div>
+            <h3 className="text-2xl font-black mb-2 text-slate-800">관리자 모드</h3>
+            <p className="text-sm text-slate-400 mb-8 font-medium">서비스 관리를 위한 인증 코드를 입력하세요.</p>
+            <input 
+              type="password" 
+              className="w-full bg-slate-50 border-none rounded-2xl px-6 py-5 text-center text-3xl font-black tracking-[0.5em] mb-6 focus:ring-2 focus:ring-blue-600 transition-all outline-none" 
+              placeholder="••••"
+              value={adminPassword}
+              onChange={e => setAdminPassword(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && handleAdminLogin()}
+              autoFocus
+            />
+            <div className="flex gap-3">
+              <button onClick={() => setShowAdminLogin(false)} className="flex-1 py-4 font-bold text-slate-400 hover:text-slate-600 transition-colors">취소</button>
+              <button onClick={handleAdminLogin} className="flex-1 bg-blue-600 text-white py-4 rounded-2xl font-bold shadow-xl shadow-blue-100 hover:bg-blue-700 transition-all">인증</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// --- Sub Components ---
+
+const SidebarItem = ({ icon, label, active, onClick, dot }) => (
+  <button 
+    onClick={onClick}
+    className={`w-full flex items-center gap-3 px-4 py-3.5 rounded-2xl transition-all duration-200 ${active ? 'bg-blue-600 text-white shadow-xl shadow-blue-900/40 translate-x-1' : 'text-slate-500 hover:bg-slate-800/50 hover:text-slate-300'}`}
+  >
+    <div className={`${active ? 'text-white' : 'text-slate-600'}`}>{icon}</div>
+    {dot && <div className={`w-1.5 h-1.5 rounded-full ${active ? 'bg-white' : 'bg-slate-700'}`}/>}
+    <span className={`text-sm font-bold ${active ? 'opacity-100' : 'opacity-80'}`}>{label}</span>
+  </button>
+);
+
+const PostList = ({ posts, isAdmin, onDelete }) => {
+  if (!posts?.length) return (
+    <div className="py-32 flex flex-col items-center justify-center text-slate-300 gap-4">
+      <FileText size={48} strokeWidth={1}/>
+      <p className="font-bold text-sm tracking-widest uppercase">No records found</p>
+    </div>
+  );
+  return (
+    <div className="space-y-6">
+      {posts.map(p => (
+        <div key={p.id} className="bg-white p-8 rounded-[2rem] border border-slate-100 shadow-sm group hover:border-blue-200 hover:shadow-xl hover:shadow-blue-50/50 transition-all duration-300">
+          <div className="flex justify-between items-start mb-4">
+            <h4 className="font-black text-xl text-slate-800 leading-snug">{p.title}</h4>
+            {isAdmin && <button onClick={() => onDelete(p.id)} className="text-slate-200 hover:text-red-500 p-2 hover:bg-red-50 rounded-xl transition-all"><Trash2 size={18}/></button>}
+          </div>
+          <p className="text-slate-500 whitespace-pre-wrap leading-relaxed font-medium">{p.content}</p>
+          <div className="mt-8 pt-6 border-t border-slate-50 flex justify-between items-center">
+            <div className="flex items-center gap-2">
+              <div className="w-6 h-6 bg-slate-100 rounded-full flex items-center justify-center text-[10px] font-black text-slate-400">A</div>
+              <span className="text-[11px] font-black text-slate-400 uppercase tracking-wider">{p.author || 'Admin'}</span>
+            </div>
+            <div className="text-[10px] font-bold text-slate-300 uppercase tracking-widest">
+              {p.createdAt ? new Date(p.createdAt.seconds * 1000).toLocaleDateString('ko-KR', {year: 'numeric', month: 'long', day: 'numeric'}) : '방금 전'}
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+};
+
+const OrgChart = ({ year, data, isAdmin, onSave }) => {
+  const [editing, setEditing] = useState(false);
+  const [local, setLocal] = useState({
+    presidents: { chair: '', vice: '' },
+    depts: DEPARTMENTS.reduce((a, d) => ({...a, [d]: { head: '' }}), {})
+  });
+
+  useEffect(() => { if(data) setLocal(data); }, [data]);
+
+  return (
+    <div className="animate-in fade-in duration-700">
+      <div className="flex justify-between items-center mb-12">
+        <div>
+          <h2 className="text-3xl font-black text-slate-800">학생회 조직체계</h2>
+          <p className="text-slate-400 text-sm font-bold mt-1 uppercase tracking-widest">{year} structure</p>
+        </div>
+        {isAdmin && (
+          <button onClick={() => { if(editing) onSave(local); setEditing(!editing); }} className={`px-8 py-3 rounded-2xl font-black text-sm transition-all shadow-lg ${editing ? 'bg-green-600 text-white hover:bg-green-700 shadow-green-100' : 'bg-slate-900 text-white hover:bg-slate-800 shadow-slate-200'}`}>
+            {editing ? '변경사항 저장' : '조직도 편집'}
+          </button>
+        )}
+      </div>
+
+      <div className="max-w-4xl mx-auto space-y-16">
+        <div className="flex justify-center gap-10">
+          <OrgNode label="학생회장" val={local.presidents?.chair} edit={editing} onUp={v => setLocal({...local, presidents: {...local.presidents, chair: v}})} color="blue" />
+          <OrgNode label="부학생회장" val={local.presidents?.vice} edit={editing} onUp={v => setLocal({...local, presidents: {...local.presidents, vice: v}})} color="blue" />
+        </div>
+        <div className="relative">
+          <div className="absolute top-0 left-1/2 -translate-x-1/2 h-10 w-px bg-slate-100"></div>
+          <div className="pt-10 grid grid-cols-2 md:grid-cols-4 gap-6">
+            {DEPARTMENTS.map(d => (
+              <OrgNode key={d} label={d} val={local.depts?.[d]?.head} edit={editing} onUp={v => setLocal({...local, depts: {...local.depts, [d]: {head: v}}})} mini />
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const OrgNode = ({ label, val, edit, onUp, m오후 3:09 2026-01-11ini, color }) => (
+  <div className={`bg-white border border-slate-100 p-6 rounded-[2rem] flex flex-col items-center shadow-sm transition-all hover:shadow-xl hover:shadow-slate-200/50 ${mini ? 'w-full' : 'w-48'} ${color === 'blue' ? 'ring-2 ring-blue-50' : ''}`}>
+    <span className={`text-[11px] font-black mb-3 uppercase tracking-tighter ${color === 'blue' ? 'text-blue-600' : 'text-slate-400'}`}>{label}</span>
+    {edit ? (
+      <input className="text-center border-b-2 border-slate-100 w-full focus:border-blue-600 transition-colors focus:outline-none text-base font-black py-1" value={val || ''} onChange={e => onUp(e.target.value)}/>
+    ) : (
+      <span className="font-black text-xl text-slate-800">{val || '-'}</span>
+    )}
+  </div>
+);
+
+export default App;
